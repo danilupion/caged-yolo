@@ -1,0 +1,24 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": ["^\\.devcontainer/Dockerfile$"],
+      "matchStrings": [
+        "ARG GIT_DELTA_VERSION=(?<currentValue>.*?)\\n"
+      ],
+      "depNameTemplate": "dandavison/delta",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": ["^\\.devcontainer/Dockerfile$"],
+      "matchStrings": [
+        "ARG ZSH_IN_DOCKER_VERSION=(?<currentValue>.*?)\\n"
+      ],
+      "depNameTemplate": "deluan/zsh-in-docker",
+      "datasourceTemplate": "github-releases"
+    }
+  ]
+}

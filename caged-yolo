@@ -1,0 +1,106 @@
+#!/bin/bash
+set -e
+
+# Resolve the real script location (follows symlinks)
+# This lets you symlink caged-yolo onto your PATH:
+#   ln -s "$(pwd)/caged-yolo" /usr/local/bin/caged-yolo
+SOURCE="$0"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# Derive paths from script location
+DEVCONTAINER_CONFIG="$SCRIPT_DIR/.devcontainer/devcontainer.json"
+
+# The project directory is wherever you invoke caged-yolo from
+PROJECT_DIR="$(pwd)"
+PROJECT_NAME="$(basename "$PROJECT_DIR")"
+
+# Extra mounts to add alongside the project
+# Usage: caged-yolo -m ~/path1 -m ~/path2
+# Becomes available as /workspaces/<dir-name> inside the container
+EXTRA_MOUNTS=""
+while [[ "${1:-}" == "--mount" || "${1:-}" == "-m" ]]; do
+  shift
+  EXTRA_MOUNTS="$EXTRA_MOUNTS --mount type=bind,source=$1,target=/workspaces/$(basename $1)"
+  shift
+done
+
+ensure_up() {
+  devcontainer up \
+    --workspace-folder "$PROJECT_DIR" \
+    --config "$DEVCONTAINER_CONFIG" \
+    --mount "type=bind,source=$PROJECT_DIR,target=/workspaces/$PROJECT_NAME" \
+    $EXTRA_MOUNTS
+}
+
+dc_exec() {
+  devcontainer exec \
+    --workspace-folder "$PROJECT_DIR" \
+    --config "$DEVCONTAINER_CONFIG" \
+    "$@"
+}
+
+case "${1:-}" in
+
+  # Manage Claude config inside the container (starts it if needed)
+  # Usage: caged-yolo config
+  # Usage: caged-yolo config set key value
+  config)
+    shift
+    ensure_up
+    dc_exec zsh -c "claude config $*"
+    docker stop $(docker ps -q --filter "label=devcontainer.local_folder=$PROJECT_DIR") 2>/dev/null || true
+    ;;
+
+  # List all running caged-yolo containers
+  # Usage: caged-yolo list
+  list)
+    containers=$(docker ps --filter "label=devcontainer.config_file=$DEVCONTAINER_CONFIG" \
+      --format '{{.Label "devcontainer.local_folder"}}\t{{.Status}}' 2>/dev/null)
+    if [ -z "$containers" ]; then
+      echo "No running containers"
+    else
+      echo "$containers" | column -t -s $'\t'
+    fi
+    ;;
+
+  # Stop the container for the current folder
+  # Usage: caged-yolo stop
+  stop)
+    docker stop $(docker ps -q --filter "label=devcontainer.local_folder=$PROJECT_DIR") 2>/dev/null \
+      && echo "Container stopped" \
+      || echo "No container running for this folder"
+    ;;
+
+  # Recreate the container (reuses cached image by default)
+  # Usage: caged-yolo rebuild           — fast, reuses image
+  # Usage: caged-yolo rebuild --fresh   — rebuilds image, gets latest Claude
+  rebuild)
+    shift
+    if [[ "${1:-}" == "--fresh" ]]; then
+      export CACHE_BUST=$(date +%s)
+    fi
+    devcontainer up \
+      --workspace-folder "$PROJECT_DIR" \
+      --config "$DEVCONTAINER_CONFIG" \
+      --remove-existing-container \
+      --mount "type=bind,source=$PROJECT_DIR,target=/workspaces/$PROJECT_NAME" \
+      $EXTRA_MOUNTS
+    ;;
+
+  # Default: start (or resume) the container and launch Claude
+  # Flags are passed through to claude, e.g:
+  #   caged-yolo -r          → resume last session
+  #   caged-yolo --help      → show claude help
+  #   caged-yolo --mount ~/other-project   → mount extra folder
+  *)
+    ensure_up
+    dc_exec zsh -c "cd /workspaces/$PROJECT_NAME && claude --dangerously-skip-permissions $*"
+    docker stop $(docker ps -q --filter "label=devcontainer.local_folder=$PROJECT_DIR") 2>/dev/null || true
+    ;;
+
+esac
