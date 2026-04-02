@@ -24,6 +24,11 @@ else
     echo "No Docker DNS rules to restore"
 fi
 
+# Reset default policies to ACCEPT before configuring
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
+
 # First allow DNS and localhost before any restrictions
 # Allow outbound DNS
 iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
