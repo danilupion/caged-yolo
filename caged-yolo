@@ -23,17 +23,38 @@ PROJECT_NAME="$(basename "$PROJECT_DIR")"
 # Usage: caged-yolo -m ~/path1 -m ~/path2
 # Becomes available as /workspaces/<dir-name> inside the container
 EXTRA_MOUNTS=""
+EXTRA_ADD_DIRS=""
 while [[ "${1:-}" == "--mount" || "${1:-}" == "-m" ]]; do
   shift
-  EXTRA_MOUNTS="$EXTRA_MOUNTS --mount type=bind,source=$1,target=/workspaces/$(basename $1)"
+  local_name="$(basename "$1")"
+  EXTRA_MOUNTS="$EXTRA_MOUNTS --mount type=bind,source=$1,target=/workspaces/$local_name"
+  EXTRA_ADD_DIRS="$EXTRA_ADD_DIRS --add-dir /workspaces/$local_name"
   shift
 done
 
 ensure_up() {
+  local remove_flag=""
+  if [ -n "$EXTRA_MOUNTS" ]; then
+    local existing_id
+    existing_id=$(docker ps -aq --filter "label=devcontainer.local_folder=$PROJECT_DIR" 2>/dev/null)
+    if [ -n "$existing_id" ]; then
+      local is_running
+      is_running=$(docker ps -q --filter "id=$existing_id" 2>/dev/null)
+      if [ -n "$is_running" ]; then
+        echo "WARNING: A container for this project is already running."
+        echo "Extra mounts (-m) require recreating the container, which would kill the active session."
+        echo "Stop it first with: caged-yolo stop"
+        exit 1
+      else
+        docker rm "$existing_id" >/dev/null 2>&1
+      fi
+    fi
+  fi
   devcontainer up \
     --workspace-folder "$PROJECT_DIR" \
     --config "$DEVCONTAINER_CONFIG" \
     --mount "type=bind,source=$PROJECT_DIR,target=/workspaces/$PROJECT_NAME" \
+    $remove_flag \
     $EXTRA_MOUNTS
 }
 
@@ -90,6 +111,7 @@ case "${1:-}" in
       --remove-existing-container \
       --mount "type=bind,source=$PROJECT_DIR,target=/workspaces/$PROJECT_NAME" \
       $EXTRA_MOUNTS
+    docker stop $(docker ps -q --filter "label=devcontainer.local_folder=$PROJECT_DIR") 2>/dev/null || true
     ;;
 
   # Default: start (or resume) the container and launch Claude
@@ -99,7 +121,7 @@ case "${1:-}" in
   #   caged-yolo --mount ~/other-project   → mount extra folder
   *)
     ensure_up
-    dc_exec zsh -c "cd /workspaces/$PROJECT_NAME && claude --dangerously-skip-permissions $*"
+    dc_exec zsh -c "cd /workspaces/$PROJECT_NAME && claude --dangerously-skip-permissions $EXTRA_ADD_DIRS $*"
     docker stop $(docker ps -q --filter "label=devcontainer.local_folder=$PROJECT_DIR") 2>/dev/null || true
     ;;
 
