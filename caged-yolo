@@ -15,6 +15,17 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 # Derive paths from script location
 DEVCONTAINER_CONFIG="$SCRIPT_DIR/.devcontainer/devcontainer.json"
 
+# Ensure host cache directory exists
+mkdir -p "$HOME/.caged-yolo/cache"
+
+# Pre-fetch GitHub meta on host (gh is authenticated, avoids container rate limits)
+GH_CACHE="$HOME/.caged-yolo/cache/github-meta.json"
+if [ ! -f "$GH_CACHE" ] || find "$GH_CACHE" -mmin +1440 -print -quit | grep -q .; then
+    if command -v gh >/dev/null 2>&1; then
+        gh api /meta > "$GH_CACHE.tmp" 2>/dev/null && mv "$GH_CACHE.tmp" "$GH_CACHE" || rm -f "$GH_CACHE.tmp"
+    fi
+fi
+
 # The project directory is wherever you invoke caged-yolo from
 PROJECT_DIR="$(pwd)"
 PROJECT_NAME="$(basename "$PROJECT_DIR")"

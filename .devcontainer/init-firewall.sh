@@ -45,58 +45,97 @@ iptables -A OUTPUT -o lo -j ACCEPT
 # Create ipset with CIDR support
 ipset create allowed-domains hash:net
 
-# Fetch GitHub meta information and aggregate + add their IP ranges
-echo "Fetching GitHub IP ranges..."
-gh_ranges=$(curl -s https://api.github.com/meta)
-if [ -z "$gh_ranges" ]; then
-    echo "ERROR: Failed to fetch GitHub IP ranges"
-    exit 1
+CACHE_DIR="/home/node/.caged-yolo/cache"
+IPSET_CACHE="$CACHE_DIR/ipset-entries.txt"
+CACHE_MAX_AGE=86400
+
+# Try to restore from cached ipset entries first
+use_cache=false
+if [ -f "$IPSET_CACHE" ]; then
+    cache_age=$(( $(date +%s) - $(stat -c %Y "$IPSET_CACHE" 2>/dev/null || echo 0) ))
+    if [ "$cache_age" -lt "$CACHE_MAX_AGE" ] && [ -s "$IPSET_CACHE" ]; then
+        echo "Restoring ipset from cache (${cache_age}s old)..."
+        use_cache=true
+    fi
 fi
 
-if ! echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null; then
-    echo "ERROR: GitHub API response missing required fields"
-    exit 1
-fi
+if [ "$use_cache" = true ]; then
+    while read -r entry; do
+        ipset add --exist allowed-domains "$entry"
+    done < "$IPSET_CACHE"
+else
+    # Fetch GitHub meta information (cached for 24h)
+    GH_CACHE_FILE="$CACHE_DIR/github-meta.json"
 
-echo "Processing GitHub IPs..."
-while read -r cidr; do
-    if [[ ! "$cidr" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-        echo "ERROR: Invalid CIDR range from GitHub meta: $cidr"
-        exit 1
+    echo "Fetching GitHub IP ranges..."
+    if [ -f "$GH_CACHE_FILE" ]; then
+        cache_age=$(( $(date +%s) - $(stat -c %Y "$GH_CACHE_FILE" 2>/dev/null || echo 0) ))
+        if [ "$cache_age" -lt "$CACHE_MAX_AGE" ] && jq -e '.web and .api and .git' "$GH_CACHE_FILE" >/dev/null 2>&1; then
+            echo "Using cached GitHub meta (${cache_age}s old)"
+            gh_ranges=$(cat "$GH_CACHE_FILE")
+        fi
     fi
-    echo "Adding GitHub range $cidr"
-    ipset add --exist allowed-domains "$cidr"
-done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
 
-# Resolve and add other allowed domains
-for domain in \
-    "raw.githubusercontent.com" \
-    "objects.githubusercontent.com" \
-    "claude.com" \
-    "registry.npmjs.org" \
-    "api.anthropic.com" \
-    "sentry.io" \
-    "statsig.anthropic.com" \
-    "statsig.com" \
-    "marketplace.visualstudio.com" \
-    "vscode.blob.core.windows.net" \
-    "update.code.visualstudio.com"; do
-    echo "Resolving $domain..."
-    ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
-    if [ -z "$ips" ]; then
-        echo "ERROR: Failed to resolve $domain"
-        exit 1
-    fi
-    
-    while read -r ip; do
-        if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            echo "ERROR: Invalid IP from DNS for $domain: $ip"
+    if [ -z "${gh_ranges:-}" ]; then
+        gh_ranges=$(curl -sS --connect-timeout 10 -w "\nHTTP_CODE:%{http_code}" https://api.github.com/meta)
+        http_code=$(echo "$gh_ranges" | tail -1 | sed 's/HTTP_CODE://')
+        gh_ranges=$(echo "$gh_ranges" | sed '$d')
+        if [ -z "$gh_ranges" ]; then
+            echo "ERROR: Failed to fetch GitHub IP ranges (empty response, HTTP $http_code)"
             exit 1
         fi
-        echo "Adding $ip for $domain"
-        ipset add --exist allowed-domains "$ip"
-    done < <(echo "$ips")
-done
+        if ! echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null; then
+            echo "ERROR: GitHub API response missing required fields (HTTP $http_code):"
+            echo "$gh_ranges" | head -5
+            exit 1
+        fi
+        echo "$gh_ranges" > "$GH_CACHE_FILE"
+    fi
+
+    echo "Processing GitHub IPs..."
+    while read -r cidr; do
+        if [[ ! "$cidr" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+            echo "ERROR: Invalid CIDR range from GitHub meta: $cidr"
+            exit 1
+        fi
+        echo "Adding GitHub range $cidr"
+        ipset add --exist allowed-domains "$cidr"
+    done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
+
+    # Resolve and add other allowed domains
+    for domain in \
+        "raw.githubusercontent.com" \
+        "objects.githubusercontent.com" \
+        "claude.com" \
+        "registry.npmjs.org" \
+        "api.anthropic.com" \
+        "sentry.io" \
+        "statsig.anthropic.com" \
+        "statsig.com" \
+        "marketplace.visualstudio.com" \
+        "vscode.blob.core.windows.net" \
+        "update.code.visualstudio.com"; do
+        echo "Resolving $domain..."
+        ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
+        if [ -z "$ips" ]; then
+            echo "ERROR: Failed to resolve $domain"
+            exit 1
+        fi
+
+        while read -r ip; do
+            if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                echo "ERROR: Invalid IP from DNS for $domain: $ip"
+                exit 1
+            fi
+            echo "Adding $ip for $domain"
+            ipset add --exist allowed-domains "$ip"
+        done < <(echo "$ips")
+    done
+
+    # Save ipset entries for future runs
+    echo "Caching ipset entries..."
+    ipset list allowed-domains | grep -E '^[0-9]' > "$IPSET_CACHE"
+fi
 
 # Get host IP from default route
 HOST_IP=$(ip route | grep default | cut -d" " -f3)
